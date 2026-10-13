@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>BCD Extractor</title>
+<style>
+:root{
+  --bg:#0b0c0f; --panel:#15171c; --text:#e8e8ea; --muted:#8a8f98; --accent:#5b8cff;
+  --border:#262a33;
+}
+@media (prefers-color-scheme: light){
+  :root:not([data-theme="dark"]){ --bg:#f4f5f7; --panel:#ffffff; --text:#15171c; --muted:#5b616e; --accent:#2f5fd6; --border:#dfe2e8; }
+}
+:root[data-theme="dark"]{ --bg:#0b0c0f; --panel:#15171c; --text:#e8e8ea; --muted:#8a8f98; --accent:#5b8cff; --border:#262a33; }
+*{box-sizing:border-box}
+body{
+  margin:0; background:var(--bg); color:var(--text);
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+  padding-top:env(safe-area-inset-top,0px); padding-bottom:env(safe-area-inset-bottom,0px);
+}
+.wrap{max-width:720px;margin:0 auto;padding:24px 16px 48px}
+h1{font-size:19px;margin:0 0 4px}
+.sub{color:var(--muted);font-size:13px;margin-bottom:20px}
+.panel{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px;margin-bottom:16px}
+.drop{border:1.5px dashed var(--border);border-radius:10px;padding:28px 16px;text-align:center;color:var(--muted);cursor:pointer;transition:.15s}
+.drop:hover{border-color:var(--accent);color:var(--text)}
+input[type=file]{display:none}
+canvas{width:100%;max-width:480px;image-rendering:pixelated;border-radius:8px;border:1px solid var(--border);display:block;margin:0 auto;background:#000}
+.row{display:flex;align-items:center;gap:10px;margin-top:12px;flex-wrap:wrap}
+button{
+  background:var(--accent);color:#fff;border:none;border-radius:8px;padding:9px 14px;
+  font-size:14px;cursor:pointer;font-weight:500;
+}
+button.secondary{background:transparent;border:1px solid var(--border);color:var(--text)}
+button:disabled{opacity:.4;cursor:default}
+input[type=range]{
+  flex:1;min-width:120px;
+  -webkit-appearance:none; appearance:none;
+  height:4px; border-radius:2px;
+  background:var(--border);
+  outline:none;
+  cursor:pointer;
+}
+input[type=range]::-webkit-slider-runnable-track{
+  height:4px; border-radius:2px; background:var(--border);
+}
+input[type=range]::-webkit-slider-thumb{
+  -webkit-appearance:none; appearance:none;
+  width:15px; height:15px; border-radius:50%;
+  background:var(--accent); border:2px solid var(--panel);
+  box-shadow:0 0 0 1px var(--accent);
+  margin-top:-5.5px;
+  transition:transform .1s;
+}
+input[type=range]::-webkit-slider-thumb:active{ transform:scale(1.15); }
+input[type=range]::-moz-range-track{
+  height:4px; border-radius:2px; background:var(--border);
+}
+input[type=range]::-moz-range-thumb{
+  width:15px; height:15px; border-radius:50%;
+  background:var(--accent); border:2px solid var(--panel);
+  box-shadow:0 0 0 1px var(--accent);
+  cursor:pointer;
+}
+.meta{font-size:12.5px;color:var(--muted);line-height:1.7;margin-top:10px}
+.meta b{color:var(--text);font-weight:600}
+audio{width:100%;margin-top:10px}
+.err{color:#ff6b6b;font-size:13px;margin-top:10px}
+a.dl{color:var(--accent);text-decoration:none;font-size:13.5px}
+a.dl:hover{text-decoration:underline}
+code{background:var(--border);padding:1px 5px;border-radius:4px;font-size:12px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>BCD Extractor</h1>
+  <div class="sub">Parses .bcd files — nibble-packed RGB332 video + μ-law audio</div>
+
+  <div class="panel">
+    <div class="drop" id="drop">Click or drop a .bcd file here</div>
+    <input type="file" id="file" accept=".bcd,.txt,*">
+    <div class="err" id="err" style="display:none"></div>
+    <div class="meta" id="meta" style="display:none"></div>
+  </div>
+
+  <div class="panel" id="videoPanel" style="display:none">
+    <canvas id="canvas"></canvas>
+    <div class="row">
+      <button id="play">Play</button>
+      <input type="range" id="scrub" min="0" value="0">
+      <span class="meta" id="frameLabel" style="margin:0">0 / 0</span>
+    </div>
+    <div class="row">
+      <button id="dlVideo" class="secondary">Download video (.mp4)</button>
+      <span class="meta" id="exportStatus" style="margin:0"></span>
+    </div>
+  </div>
+
+  <audio id="audio" preload="auto" style="position:absolute;width:1px;height:1px;opacity:0;pointer-events:none;overflow:hidden;"></audio>
+</div>
+
+<script>
+const dropEl = document.getElementById('drop');
+const fileEl = document.getElementById('file');
+const errEl = document.getElementById('err');
+const metaEl = document.getElementById('meta');
+const videoPanel = document.getElementById('videoPanel');
+const audioPanel = document.getElementById('audioPanel');
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const playBtn = document.getElementById('play');
+const scrub = document.getElementById('scrub');
+const frameLabel = document.getElementById('frameLabel');
+
+dropEl.onclick = () => fileEl.click();
+window.addEventListener('dragover', e => { e.preventDefault(); dropEl.style.borderColor='var(--accent)'; });
+window.addEventListener('dragleave', e => { if (e.target===document.body || e.target===dropEl) dropEl.style.borderColor='var(--border)'; });
+window.addEventListener('drop', e => {
+  e.preventDefault();
+  dropEl.style.borderColor='var(--border)';
+  if (e.dataTransfer.files.length) handleFile(e.dataTransfer.files[0]);
+});
+fileEl.onchange = () => { if (fileEl.files.length) handleFile(fileEl.files[0]); };
+
+function showErr(msg){
+  errEl.textContent = msg;
+  errEl.style.display = 'block';
+  metaEl.style.display = 'none';
+  videoPanel.style.display = 'none';
+  audioPanel.style.display = 'none';
+}
+
+// G.711 mu-law decode table
+const ULAW_TABLE = new Int16Array(256);
+for (let i = 0; i < 256; i++) {
+  let u = (~i) & 0xFF;
+  let t = ((u & 0x0F) << 3) + 0x84;
+  t <<= (u & 0x70) >> 4;
+  ULAW_TABLE[i] = (u & 0x80) ? (t - 0x84) : (0x84 - t);
+}
+
+function handleFile(file){
+  const reader = new FileReader();
+  reader.onload = () => {
+    try{
+      parseBCD(new Uint8Array(reader.result), file.name);
+    }catch(e){
+      showErr('Failed to parse: ' + e.message);
+    }
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+function parseBCD(bytes, name){
+  errEl.style.display = 'none';
+  let offset = 0;
+  let width, height, fps, sampleRate, frameCountHdr, audioLen;
+  let hasHeader = bytes[0]===0x42 && bytes[1]===0x43 && bytes[2]===0x44; // "BCD"
+
+  if (hasHeader){
+    const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const ver = bytes[3];
+    width        = dv.getUint16(4,  false);
+    height       = dv.getUint16(6,  false);
+    fps          = dv.getUint16(8,  false);
+    sampleRate   = dv.getUint16(12, false);
+    frameCountHdr= dv.getUint16(16, false);
+    audioLen     = (dv.getUint16(18, false) << 16) | dv.getUint16(20, false);
+    offset = 27; // 26-byte struct + 1 sync byte, empirically confirmed
+  } else {
+    // no header: raw legacy stream, assume standard 160x284 tiled frame, no audio
+    width = 160; height = 284; fps = 10; sampleRate = 8000; audioLen = 0;
+    offset = 0;
+  }
+
+  // decode video frames: groups of 4 bytes (each a 2-bit value in hex-digit form) -> 1 byte RGB332
+  // 0xFF ends a pixel group, 0xEE ends a row, 0xAA ends a frame
+  const frames = [];
+  let row = [], cur = [];
+  const n = bytes.length - (audioLen||0); // don't walk into audio region
+  let i = offset;
+  let tok = [];
+  while (i < n){
+    const b = bytes[i];
+    if (b === 0xFF || b === 0xEE || b === 0xAA){
+      if (tok.length === 4){
+        let ok = true;
+        const v = [0,0,0,0];
+        for (let k=0;k<4;k++){
+          const x = tok[k];
+          if (x!==0 && x!==1 && x!==16 && x!==17){ ok=false; break; }
+          v[k] = ((x>>4)<<1) | (x&0xF);
+        }
+        if (ok) cur.push((v[0]<<6)|(v[1]<<4)|(v[2]<<2)|v[3]);
+        else cur.push(0);
+      }
+      tok = [];
+      if (b === 0xEE){ row.push(cur); cur = []; }
+      if (b === 0xAA){ frames.push(row); row = []; cur = []; }
+      i++;
+    } else {
+      tok.push(b); i++;
+    }
+  }
+
+  const full = frames.filter(f => f.length === height && f.every(r => r.length === width));
+  if (full.length === 0) throw new Error('no complete frames decoded (check width/height)');
+
+  // crop shared blank/border rows & cols, tolerant of minor noise.
+  // only do this for the legacy headerless format: a real BCD header's
+  // declared width/height is authoritative and should not be trimmed,
+  // since a solid-color region can be real design, not padding.
+  const W = width, H = height;
+  let r0=0, r1=H, c0=0, c1=W;
+  if (!hasHeader){
+    const TOL = 2;
+    const colMin = new Array(W).fill(255), colMax = new Array(W).fill(0);
+    const rowMin = new Array(H).fill(255), rowMax = new Array(H).fill(0);
+    for (const f of full){
+      for (let y=0;y<H;y++){
+        const r = f[y];
+        for (let x=0;x<W;x++){
+          const v = r[x];
+          if (v<colMin[x]) colMin[x]=v; if (v>colMax[x]) colMax[x]=v;
+          if (v<rowMin[y]) rowMin[y]=v; if (v>rowMax[y]) rowMax[y]=v;
+        }
+      }
+    }
+    const isBlankCol = colMin.map((mn,x)=> (colMax[x]-mn) <= TOL);
+    const isBlankRow = rowMin.map((mn,y)=> (rowMax[y]-mn) <= TOL);
+    r0=0; while(r0<H && isBlankRow[r0]) r0++;
+    r1=H; while(r1>r0 && isBlankRow[r1-1]) r1--;
+    c0=0; while(c0<W && isBlankCol[c0]) c0++;
+    c1=W; while(c1>c0 && isBlankCol[c1-1]) c1--;
+    if (r1<=r0) { r0=0; r1=H; }
+    if (c1<=c0) { c0=0; c1=W; }
+  }
+
+  const cw = c1-c0, ch = r1-r0;
+  const rgbFrames = full.map(f => {
+    const img = new Uint8ClampedArray(cw*ch*4);
+    for (let y=0;y<ch;y++){
+      for (let x=0;x<cw;x++){
+        const v = f[y+r0][x+c0];
+        const r = Math.round(((v>>5)&7) * 255/7);
+        const g = Math.round(((v>>2)&7) * 255/7);
+        const b = (v&3) * 85;
+        const idx = (y*cw+x)*4;
+        img[idx]=r; img[idx+1]=g; img[idx+2]=b; img[idx+3]=255;
+      }
+    }
+    return img;
+  });
+
+  // NOTE: frames are kept in full, undeduplicated, 1-per-decoded-frame order.
+  // Deduping consecutive identical frames would shorten the video timeline
+  // while the audio track keeps its original duration, causing drift/desync.
+  const deduped = rgbFrames;
+
+  // audio
+  let wavBlob = null, wavUrl = null;
+  if (audioLen > 0){
+    const audioBytes = bytes.slice(bytes.length - audioLen);
+    const pcm = new Int16Array(audioBytes.length);
+    for (let k=0;k<audioBytes.length;k++) pcm[k] = ULAW_TABLE[audioBytes[k]];
+    wavBlob = pcmToWav(pcm, sampleRate || 8000);
+    wavUrl = URL.createObjectURL(wavBlob);
+  }
+
+  renderResult({name, width:cw, height:ch, fps: fps||10, frames: deduped, totalParsed: full.length, afterDedupe: deduped.length, audioLen, sampleRate, wavUrl, hasHeader});
+}
+
+function pcmToWav(pcm, sampleRate){
+  const bytesPerSample = 2;
+  const blockAlign = bytesPerSample;
+  const byteRate = sampleRate * blockAlign;
+  const dataSize = pcm.length * bytesPerSample;
+  const buf = new ArrayBuffer(44 + dataSize);
+  const dv = new DataView(buf);
+  function str(o,s){ for(let i=0;i<s.length;i++) dv.setUint8(o+i, s.charCodeAt(i)); }
+  str(0,'RIFF'); dv.setUint32(4, 36+dataSize, true); str(8,'WAVE');
+  str(12,'fmt '); dv.setUint32(16,16,true); dv.setUint16(20,1,true);
+  dv.setUint16(22,1,true); dv.setUint32(24,sampleRate,true);
+  dv.setUint32(28,byteRate,true); dv.setUint16(32,blockAlign,true); dv.setUint16(34,16,true);
+  str(36,'data'); dv.setUint32(40,dataSize,true);
+  for (let i=0;i<pcm.length;i++) dv.setInt16(44+i*2, pcm[i], true);
+  return new Blob([buf], {type:'audio/wav'});
+}
+
+let state = null, playing = false, rafId = null, lastT = 0, acc = 0;
+
+function renderResult(r){
+  state = r;
+  metaEl.style.display = 'block';
+  metaEl.innerHTML = `<b>${r.name}</b><br>${r.width}×${r.height} &middot; ${r.fps} fps &middot; `+
+    `${r.totalParsed} frames` +
+    (r.audioLen ? ` &middot; ${(r.audioLen/ (r.sampleRate||8000)).toFixed(1)}s audio @ ${r.sampleRate}Hz` : ' &middot; no audio block found');
+
+  videoPanel.style.display = 'block';
+  canvas.width = r.width; canvas.height = r.height;
+  scrub.max = r.frames.length - 1;
+  scrub.value = 0;
+  showFrame(0);
+
+  document.getElementById('dlVideo').onclick = exportVideo;
+
+  const audioEl = document.getElementById('audio');
+  if (r.wavUrl){
+    audioEl.src = r.wavUrl;
+    audioEl.load();
+  } else {
+    audioEl.removeAttribute('src');
+  }
+}
+
+function showFrame(idx){
+  const f = state.frames[idx];
+  const imgData = new ImageData(f, state.width, state.height);
+  ctx.putImageData(imgData, 0, 0);
+  frameLabel.textContent = `${idx+1} / ${state.frames.length}`;
+  scrub.value = idx;
+}
+
+scrub.oninput = () => {
+  showFrame(+scrub.value);
+  const audioEl = document.getElementById('audio');
+  if (audioEl.src){
+    audioEl.currentTime = (+scrub.value) / (state.fps || 10);
+    // an <audio> element that already reached 'ended' needs an explicit
+    // play() call again — just setting currentTime won't resume it
+    if (playing){
+      const p = audioEl.play();
+      if (p && p.catch) p.catch(()=>{});
+    }
+  }
+};
+
+playBtn.onclick = () => {
+  playing = !playing;
+  playBtn.textContent = playing ? 'Pause' : 'Play';
+  const audioEl = document.getElementById('audio');
+  const hasAudio = !!(state.wavUrl && audioEl.src);
+  if (playing){
+    if (+scrub.value >= state.frames.length - 1) showFrame(0);
+    if (hasAudio){
+      audioEl.currentTime = (+scrub.value) / (state.fps || 10);
+      const p = audioEl.play();
+      if (p && p.catch) p.catch(err => {
+        frameLabel.textContent = 'audio play failed: ' + err.message;
+      });
+    }
+    lastT = performance.now(); acc = 0; rafId = requestAnimationFrame(tick);
+  } else {
+    cancelAnimationFrame(rafId);
+    if (hasAudio) audioEl.pause();
+  }
+};
+
+// NOTE: no 'ended' listener here on purpose — video and audio durations
+// can differ by a frame or two of rounding, so letting audio's natural
+// end stop playback early caused the two to desync. The frame-wrap logic
+// in tick() below is the single source of truth for looping/resetting both.
+
+function tick(t){
+  if (!playing) return;
+  const audioEl = document.getElementById('audio');
+  const hasAudio = !!(state.wavUrl && audioEl.src);
+  if (hasAudio){
+    // audio's own clock is the source of truth — derive the video frame
+    // from it every tick instead of an independent timer, so the two
+    // can never drift apart over a long clip
+    let idx = Math.floor(audioEl.currentTime * (state.fps || 10));
+    if (idx >= state.frames.length || audioEl.ended){
+      idx = 0;
+      audioEl.currentTime = 0;
+      const p = audioEl.play();
+      if (p && p.catch) p.catch(()=>{});
+    }
+    showFrame(idx);
+  } else {
+    const dt = t - lastT; lastT = t;
+    acc += dt;
+    const frameMs = 1000 / (state.fps || 10);
+    if (acc >= frameMs){
+      acc = 0;
+      let idx = +scrub.value + 1;
+      if (idx >= state.frames.length) idx = 0;
+      showFrame(idx);
+    }
+  }
+  rafId = requestAnimationFrame(tick);
+}
+
+function exportVideo(){
+  const statusEl = document.getElementById('exportStatus');
+  const fps = state.fps || 10;
+  const mainAudio = document.getElementById('audio');
+  // use a separate audio element for export so we never rewire (and silence)
+  // the main playback element's output routing
+  const exportAudio = mainAudio.src ? new Audio(mainAudio.src) : null;
+  const canvasStream = canvas.captureStream(fps);
+  const tracks = [...canvasStream.getVideoTracks()];
+  let audioCtx = null;
+  if (exportAudio){
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const srcNode = audioCtx.createMediaElementSource(exportAudio);
+    const dest = audioCtx.createMediaStreamDestination();
+    srcNode.connect(dest);
+    tracks.push(...dest.stream.getAudioTracks());
+  }
+  const combined = new MediaStream(tracks);
+  let mime = 'video/mp4';
+  if (!(window.MediaRecorder && MediaRecorder.isTypeSupported(mime))) mime = 'video/webm';
+  const rec = new MediaRecorder(combined, {mimeType: mime});
+  const chunks = [];
+  rec.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
+  rec.onstop = () => {
+    const blob = new Blob(chunks, {type: mime});
+    const url = URL.createObjectURL(blob);
+    const ext = mime.includes('mp4') ? 'mp4' : 'webm';
+    const a = document.createElement('a');
+    a.href = url; a.download = 'bcd_clip.' + ext; a.click();
+    URL.revokeObjectURL(url);
+    statusEl.textContent = 'Saved as .' + ext + (ext==='webm' ? ' (mp4 not supported in this browser)' : '');
+    if (audioCtx) audioCtx.close();
+  };
+
+  const wasIdx = +scrub.value;
+  showFrame(0);
+  playing = true; playBtn.textContent = 'Pause';
+  statusEl.textContent = 'Recording…';
+  rec.start();
+  if (exportAudio) exportAudio.play();
+  lastT = performance.now(); acc = 0; rafId = requestAnimationFrame(tick);
+
+  const durationMs = (state.frames.length / fps) * 1000 + 300;
+  setTimeout(() => {
+    rec.stop();
+    playing = false; playBtn.textContent = 'Play';
+    cancelAnimationFrame(rafId);
+    if (exportAudio) exportAudio.pause();
+  }, durationMs);
+}
+</script>
+</body>
+</html>
